@@ -9,10 +9,13 @@ https://www.markdownguide.org/basic-syntax/
 #include <time.h>
 int main() {
 
-    int start = clock();
-    int end = clock();
+    clock_t start = clock();
+    clock_t end = clock();
 
-    printf("Code speed: %d\n", end-start);
+    // FUNCTION CODE
+
+    double total = (double)(end-start) / CLOCKS_PER_SEC;
+    printf("Processor time taken in function: %d\n", (double)(end-start)/CLOCKS_PER_SEC);
     return 0;    
 }
 ```
