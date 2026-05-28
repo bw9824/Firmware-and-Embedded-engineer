@@ -1,4 +1,4 @@
-# Embedded Systems Protocols Master Sheet
+# Embedded Systems Protocols Sheet
 
 | Feature / Protocol | UART | I2C | SPI |
 | --- | --- | --- | --- |
