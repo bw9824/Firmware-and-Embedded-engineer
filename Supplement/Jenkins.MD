@@ -7,9 +7,8 @@ We will cover what Jenkins is, how to set it up cleanly using Docker, and how to
 2. [時間軸](#時間軸)
 
 ## Introduction
-What is Jenkins?
-
-Before touching any code, let us understand what problem Jenkins solves.
+**What is Jenkins?**
+Before we start writing code, let's understand what problem Jenkins solves.
 
 In traditional software development, after writing code, a developer has to manually perform several repetitive steps:
 1. Compile the code.
