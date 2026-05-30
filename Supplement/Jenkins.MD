@@ -6,7 +6,8 @@ We will cover what Jenkins is, how to set it up cleanly using Docker, and how to
 1. [Introduction](#Introduction)
 2. [時間軸](#時間軸)
 
-## 1. Introduction: What is Jenkins?
+#### Introduction
+What is Jenkins?
 
 Before touching any code, let us understand what problem Jenkins solves.
 
