@@ -4,7 +4,7 @@ We will cover what Jenkins is, how to set it up cleanly using Docker, and how to
 
 ## Catalog
 1. [Introduction](#Introduction)
-2. [時間軸](#時間軸)
+2. [Setting](#Setting)
 
 ## Introduction
 **What is Jenkins?**
@@ -19,16 +19,13 @@ In traditional software development, after writing code, a developer has to manu
 Doing this manually every single time is time-consuming and prone to human error. **Jenkins is an open-source automation server that eliminates this manual labor.**
 
 Jenkins achieves this through a concept known as **CI/CD**:
-* **Continuous Integration (CI):** Every time you push new code to a repository (like GitHub), Jenkins automatically detects the change, downloads the code, builds it, and runs tests immediately.
-* **Continuous Deployment (CD):** If all tests pass successfully, Jenkins can automatically push the new version of your application straight to your testing or production servers.
+- **Continuous Integration (CI):** Every time you push new code to a repository (like GitHub), Jenkins automatically detects the change, downloads the code, builds it, and runs tests immediately.
+- **Continuous Deployment (CD):** If all tests pass successfully, Jenkins can automatically push the new version of your application straight to your testing or production servers.
 
 ---
 
-## 2. Setting Up Jenkins (Using Docker)
-
-There are many ways to install Jenkins, but using **Docker** is the cleanest and fastest method for absolute beginners. It keeps your main operating system clean and prevents installation errors.
-
-### 📌 Prerequisites
+## Setting
+### Prerequisites
 * You must have **Docker Desktop** installed and running on your computer.
 
 ### Step 1: Run the Jenkins Container
@@ -41,7 +38,7 @@ docker run -d \
   -v jenkins_home:/var/jenkins_home \
   --name my-jenkins \
   jenkins/jenkins:lts-jdk17
-
+```
 
 💡 Explaining the Command Parameters:
 -d: Runs the container in the background (detached mode). You can close your terminal and Jenkins will keep running.
