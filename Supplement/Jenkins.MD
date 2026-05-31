@@ -22,8 +22,6 @@ Jenkins achieves this through a concept known as **CI/CD**:
 - **Continuous Integration (CI):** Every time you push new code to a repository (like GitHub), Jenkins automatically detects the change, downloads the code, builds it, and runs tests immediately.
 - **Continuous Deployment (CD):** If all tests pass successfully, Jenkins can automatically push the new version of your application straight to your testing or production servers.
 
----
-
 ## Setting
 ### Prerequisites
 * You must have **Docker Desktop** installed and running on your computer.
