@@ -1,5 +1,7 @@
 # Jenkins Notes: From Zero to Your First Report
+
 ---
+
 ## Table of Contents
 
 1. [What Problem Does Jenkins Actually Solve?](#1.What_Problem_Does_Jenkins_Actually_Solve?)
