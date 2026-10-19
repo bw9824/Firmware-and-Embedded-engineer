@@ -22,12 +22,19 @@
 18. [Reading build output and reports](#18-reading-build-output-and-reports)
 19. [Troubleshooting](#19-troubleshooting)
 20. [Practices worth adopting](#20-practices-worth-adopting)
+21. [Credentials in depth](#21-credentials-in-depth)
+22. [Multibranch Pipelines, hands-on](#22-multibranch-pipelines-hands-on)
+23. [More pipeline building blocks](#23-more-pipeline-building-blocks)
+24. [Securing and operating the controller](#24-securing-and-operating-the-controller)
+25. [A firmware pipeline: cross-compile, test, flash](#25-a-firmware-pipeline-cross-compile-test-flash)
+26. [Shared Libraries](#26-shared-libraries)
 
 **Appendices**
 
 - [Appendix A — End-to-end walkthrough](#appendix-a--end-to-end-walkthrough)
 - [Appendix B — Command and URL reference](#appendix-b--command-and-url-reference)
 - [Appendix C — The sample project](#appendix-c--the-sample-project)
+- [Appendix D — Windows and Docker Desktop](#appendix-d--windows-and-docker-desktop)
 
 ---
 
@@ -269,7 +276,12 @@ Timestamper, and other essentials. You don't need to understand each one yet.
 
 > **Not in the suggested set**, and needed later: **Docker** (the cloud plugin, Section 11),
 > **Docker Pipeline** (the `docker.build` step, Section 17), **Coverage** (Section 18), and
-> **Pipeline Graph View** (Section 18). Install them when you reach those sections.
+> **Lockable Resources** (the `lock()` step, Section 25). Install them when you reach those
+> sections.
+>
+> **Already in the suggested set:** **Pipeline Graph View**, the stage visualization used throughout
+> this document. It replaced the older *Pipeline: Stage View* in the setup wizard in 2024, so
+> older tutorials showing a Stage View grid won't match what a fresh install shows you.
 
 ### Create your admin user
 
@@ -362,7 +374,7 @@ The ones you'll use constantly:
 | `WORKSPACE` | Absolute path to the workspace on the agent. **Use this instead of hardcoding paths.** |
 | `NODE_NAME` | Name of the agent running the build (`built-in` for the controller) |
 | `EXECUTOR_NUMBER` | Which executor slot on that node — handy for allocating per-build ports |
-| `GIT_COMMIT` | Commit SHA that was checked out (with the Git plugin) |
+| `GIT_COMMIT` | Commit SHA that was checked out (with the Git plugin). In a pipeline that uses `skipDefaultCheckout(true)`, the `GIT_*` variables are **not** set automatically — see Section 16. |
 | `BRANCH_NAME` | Branch being built — **Multibranch pipelines only.** Not set in a plain Pipeline job. |
 
 Using them:
@@ -378,6 +390,12 @@ echo "workspace:    ${WORKSPACE}"
 > In Console Output each command appears to repeat. The line beginning with `+` is **the command
 > being executed** (the shell's trace output); the line after it is **that command's output**. Not
 > a bug.
+>
+> The trace comes from Jenkins running your script as `sh -xe` (`-x` = trace, `-e` = stop on the
+> first error). That default only applies when the script has **no shebang line**. Once a step
+> starts with `#!/usr/bin/env bash` (as most examples here do), Jenkins runs it exactly as written:
+> no trace and no `-e` unless you add them yourself — which is why those examples use
+> `set -xeuo pipefail`.
 
 ### Understanding the workspace
 
@@ -476,7 +494,7 @@ environment inside the workspace:
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
+set -xeuo pipefail
 
 python3 -m venv "${WORKSPACE}/.venv"
 source "${WORKSPACE}/.venv/bin/activate"
@@ -498,15 +516,19 @@ python -m pytest -q
 > If that fails, install the right package in your agent image (Section 11) — don't work around it
 > in the pipeline.
 
-> **Shell gotcha — `set -euo pipefail`**
-> Jenkins decides pass/fail from the script's **final exit code**. Without `set -e`, a command can
-> fail in the middle and the build still goes green because the last line succeeded. Put
-> `set -euo pipefail` at the top of every non-trivial shell step. This is one of the highest-value
-> habits in this document.
+> **Shell gotcha — `set -xeuo pipefail`**
+> Jenkins decides pass/fail from the script's **exit code**. With no shebang, Jenkins runs the
+> step as `/bin/sh -xe`, so `-e` is already on. **A shebang line turns that default off**: the
+> script above starts with `#!/usr/bin/env bash`, so without its own `set -e` a command could fail
+> in the middle and the build would still go green because the last line succeeded. Put
+> `set -xeuo pipefail` right after the shebang of every non-trivial shell step. This is one of the
+> highest-value habits in this document.
 >
+> - `-x` print each command before running it (the `+` lines from Section 8)
 > - `-e` exit on any error
 > - `-u` error on undefined variables
-> - `-o pipefail` a pipeline fails if *any* stage of it fails, not just the last
+> - `-o pipefail` a pipeline fails if *any* stage of it fails, not just the last — something the
+>   default `sh -xe` never gives you, even without a shebang
 
 Save and build. The console shows Jenkins cloning the repository, then running your script.
 
@@ -547,12 +569,25 @@ simplest fix is to mount the socket into the Jenkins container:
 -v /var/run/docker.sock:/var/run/docker.sock
 ```
 
-and set the URI to `unix:///var/run/docker.sock`. The socket is usually owned by `root:docker`, and
-the `jenkins` user inside the container isn't in that group, so you often also need:
+and set the URI to `unix:///var/run/docker.sock`. The `jenkins` user inside the container usually
+isn't allowed to use the socket, so you also need to add it to whichever group owns the socket.
+Ask the container rather than guessing — it works the same on Linux and Docker Desktop:
+
+```bash
+docker exec jenkins ls -ln /var/run/docker.sock
+# srw-rw---- 1 0 999 0 ... /var/run/docker.sock   ← the 4th column is the group ID (here 999)
+```
+
+Recreate the container with that GID added:
 
 ```
---group-add "$(getent group docker | cut -d: -f3)"
+--group-add 999
 ```
+
+On a Linux host the same number comes from `getent group docker | cut -d: -f3`. On **Docker
+Desktop (Windows/macOS)** there is no `docker` group on your machine at all — the socket lives
+inside Docker's VM and commonly shows up as group `0` — so the `ls -ln` check is the only reliable
+way. See [Appendix D](#appendix-d--windows-and-docker-desktop) for the full Windows command.
 
 Then click **Test Connection**. A working connection prints the daemon's version string; anything
 else, click **Show Details** and read the actual error.
@@ -576,6 +611,21 @@ else, click **Show Details** and read the actual error.
 | **Remote File System Root** | `/home/jenkins/agent` | Where the workspace is created inside the container |
 | **Connect method** | *Attach Docker container* or *Connect with JNLP* | Attach uses `jenkins/agent:*`; JNLP/inbound uses `jenkins/inbound-agent:*` — the image must match the method |
 | **Pull strategy** | **Never pull** for locally built images | Otherwise provisioning fails trying to pull an image that only exists on your host |
+| **Network** (under *Container settings*) | `jenkins` | Puts the agent on the network created in Section 5, so it can reach the controller by name |
+| **Jenkins URL** (under *Connect with JNLP*) | `http://jenkins:8080/` | The address the **agent** dials to connect back |
+
+> **⚠️ The step everyone misses: the agent must be able to reach the controller.**
+> With *Connect with JNLP*, the new container connects *back* to Jenkins using the Jenkins URL —
+> by default the one you accepted at first login, `http://localhost:8080/`. Inside the agent
+> container, `localhost` is **the agent container itself**, so the connection goes nowhere: the
+> container starts, the build sits in the queue, and the agent never comes online. Fix both
+> fields above: put the agent on the `jenkins` network, and give it `http://jenkins:8080/`
+> (`jenkins` is the controller's container name, which Docker resolves on that network). This is
+> exactly why Section 5 created the network.
+>
+> *Attach Docker container* doesn't have this problem — Jenkins drives that agent through the
+> Docker API instead of the agent dialing in — which makes it a reasonable fallback if JNLP
+> won't connect. Remember it needs a `jenkins/agent` image, not `jenkins/inbound-agent`.
 
 ### Using a label
 
@@ -607,6 +657,8 @@ predictable):
 
 ```dockerfile
 # Dockerfile.agent
+# Pin the base image too. Pick a current tag from hub.docker.com/r/jenkins/inbound-agent/tags —
+# tags look like <remoting-version>-<n>-jdk21. `latest-jdk21` works but moves under you.
 FROM jenkins/inbound-agent:latest-jdk21
 
 USER root
@@ -639,7 +691,8 @@ Then create a template pointing at that image with the label `docker-agent-pytho
 is also exactly how you handle specialized toolchains or hardware — one label for agents with a
 particular SDK, another for the two machines with physical test hardware attached. For
 hardware-attached agents, use permanent agents with **1 executor** so two builds can't grab the
-same device.
+same device. Section 25 builds this out fully: a cross-compiler agent image plus a lab machine with
+a board attached.
 
 ---
 
@@ -654,6 +707,16 @@ The repository tells Jenkins about a push, rather than Jenkins asking repeatedly
 3. In GitHub: **Settings → Webhooks → Add webhook**, Payload URL
    `http://<your-jenkins>/github-webhook/` (**the trailing slash matters**), content type
    `application/json`, event: *Just the push event*.
+
+> **Pipeline-from-SCM jobs: the trigger can live in the Jenkinsfile instead.** Rather than ticking
+> the box in the UI, declare it as code (the Section 15 chicken-and-egg rule applies — run once by
+> hand first):
+>
+> ```groovy
+> triggers { githubPush() }
+> ```
+>
+> Multibranch Pipelines don't use this at all — the webhook triggers a branch scan (Section 22).
 
 > **The job's Git URL must match the webhook's repository.** The trigger matches the pushed
 > repository against the SCM URL in the job. A job cloning `git@github.com:me/x` and a webhook from
@@ -843,7 +906,7 @@ pipeline {
             steps {
                 echo 'Building..'
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     python3 --version
                     echo "doing build stuff.."
                 '''
@@ -854,7 +917,7 @@ pipeline {
             steps {
                 echo 'Testing..'
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     echo "doing test stuff.."
                 '''
             }
@@ -864,7 +927,7 @@ pipeline {
             steps {
                 echo 'Delivering..'
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     echo "doing delivery stuff.."
                 '''
             }
@@ -885,11 +948,19 @@ agent's shell.
 > the string — `'''` immediately followed by `#!`, with no leading newline or spaces. Without it
 > you get `/bin/sh`, where `set -o pipefail` may not exist and `${ARRAY[0]}` fails with
 > "Bad substitution".
+>
+> The flip side: with a shebang, Jenkins no longer adds its default `-xe` flags (Section 8), so
+> the script gets neither tracing nor stop-on-error unless it asks — hence `set -xeuo pipefail` on
+> the next line.
 
-### Reading the Stage View
+### Reading the stage graph
 
-Save and build. The view is split into your three stages, each green or red, with per-stage timing.
-Click any stage to see its logs.
+Save and build. Open the build and select **Stages** (Pipeline Graph View, from the suggested
+plugins): your three stages appear as a graph, each green or red, with per-stage timing. Click any
+stage to see just its logs.
+
+> If you've installed the older **Pipeline: Stage View** plugin, the job page also shows a grid —
+> stages as columns, builds as rows. Same information, different layout.
 
 > **Upstream failure cascades.** If Test contains an error, Deliver never runs — even though
 > Deliver's own syntax is fine. That's the correct default. Where you genuinely want to continue,
@@ -924,8 +995,10 @@ Save and build. The console confirms it **obtained the Jenkinsfile from Git**.
 1. **An extra stage appears** — `Declarative: Checkout SCM`, which you didn't write. With
    *Pipeline script from SCM*, Jenkins must clone the repo to read the Jenkinsfile, and that clone
    shows up as a stage. Expected.
-2. **The Stage View history clears.** Adding a stage changes the pipeline's shape, so the
-   visualization re-baselines. Nothing is lost — the builds still exist and their logs are intact.
+2. **Older builds look different from new ones.** Each build's graph shows the stages *that build*
+   ran, so the build before the change has no `Declarative: Checkout SCM` node. (With the older
+   Stage View plugin, the whole grid re-baselines and seems to clear.) Nothing is lost — the
+   builds still exist and their logs are intact.
 
 > **The file in Git is the source of truth.** A classic waste of an afternoon: editing your local
 > copy, or the old inline script in the UI, and wondering why nothing changes. Once the job is set
@@ -949,7 +1022,7 @@ Once the Jenkinsfile is in the repo, switch from a Pipeline job to a **Multibran
 Jenkins then discovers every branch and pull request containing a Jenkinsfile and builds each one
 automatically — no per-branch job configuration. For most teams this is the destination. It also
 unlocks `BRANCH_NAME` and `when { branch '...' }`, both of which do nothing in a plain Pipeline job
-(see Section 16).
+(see Section 16). Step-by-step setup is in Section 22.
 
 ---
 
@@ -959,23 +1032,31 @@ One Jenkinsfile, multiple stages, progressing through environments in sequence:
 
 ```groovy
 pipeline {
-    agent { label 'docker-agent-python' }
+    agent none                            // each stage picks its own agent — see the input note
 
     stages {
         stage('Dev') {
+            agent { label 'docker-agent-python' }
             steps { sh 'echo "deploy to dev"' }
         }
 
         stage('UAT') {
+            agent { label 'docker-agent-python' }
             steps { sh 'echo "deploy to uat"' }
         }
 
         stage('Prod') {
-            when { branch 'main' }        // Multibranch only — see below
-            steps {
-                input message: 'Deploy to production?', ok: 'Deploy'
-                sh 'echo "deploy to prod"'
+            when {
+                beforeAgent true          // evaluate before allocating an agent
+                beforeInput true          // and before asking anyone
+                branch 'main'             // Multibranch only — see below
             }
+            input {                       // stage-level input: waits with NO executor held
+                message 'Deploy to production?'
+                ok 'Deploy'
+            }
+            agent { label 'docker-agent-python' }
+            steps { sh 'echo "deploy to prod"' }
         }
     }
 }
@@ -994,8 +1075,32 @@ from Section 14, used deliberately as a deployment gate.
 > ```
 >
 > Or move to a Multibranch Pipeline.
+>
+> **And if the pipeline uses `skipDefaultCheckout(true)`** (like Appendix C), `env.GIT_BRANCH` is
+> empty too. Declarative's *automatic* checkout copies the `GIT_*` values into `env`; an explicit
+> `checkout scm` only **returns** them as a map. Copy them across yourself:
+>
+> ```groovy
+> stage('Checkout') {
+>     steps {
+>         cleanWs()
+>         script {
+>             def scmVars = checkout scm
+>             env.GIT_BRANCH = scmVars.GIT_BRANCH
+>             env.GIT_COMMIT = scmVars.GIT_COMMIT
+>         }
+>     }
+> }
+> ```
 
-> **`input` holds an executor** while it waits. For long waits, put it outside the agent block.
+> **Where you put `input` decides whether it holds an executor.** An `input` *step* inside `steps`
+> runs on the stage's agent — and if the pipeline has a top-level `agent`, every stage is on that
+> agent — so the executor sits idle, blocked, until someone clicks. Overnight, that's an executor
+> gone for the night. The pattern above avoids it: `agent none` at the top, the stage-level
+> `input { }` directive (evaluated **before** the stage's agent is allocated), and
+> `beforeAgent` / `beforeInput` on `when` so a non-`main` build skips the stage without allocating
+> or asking anything. Add a `timeout` around long approvals too: stage
+> `options { timeout(time: 1, unit: 'DAYS') }`.
 
 ### Running independent work in parallel
 
@@ -1009,12 +1114,23 @@ stage('Checks') {
 }
 ```
 
-Each branch needs a free executor, so parallelism is bounded by your agent capacity.
+How many executors this uses depends on where the branches run:
+
+- **Branches with no `agent` of their own** (as above, and in Appendix C) run concurrently on the
+  executor and workspace the pipeline already holds. No extra executors — but they share CPU on
+  that one agent, so this parallelism is about overlapping work, not adding machines.
+- **Branches that each declare an `agent`** each wait for their own free executor, so how many
+  actually run at once is bounded by your agent capacity.
 
 > **Parallel branches share one workspace** unless each declares its own `agent`. That's usually
 > what you want — the venv built in an earlier stage is right there — but it means two branches
 > writing the same file will collide. Give each branch a distinct output path
 > (`reports/junit-lint.xml` vs `reports/junit-tests.xml`), as Section 17 does.
+
+> **By default, one failing branch does not stop the others** — Lint failing still lets Test
+> finish, which is usually what you want for checks. To abort the siblings as soon as one fails,
+> add `failFast true` inside the parallel stage, or `options { parallelsAlwaysFailFast() }` for
+> the whole pipeline.
 
 ---
 
@@ -1090,7 +1206,7 @@ pipeline {
         stage('Set up environment') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
 
                     python3 -m venv "$VENV"
                     "$VENV/bin/python" -m pip install --upgrade pip
@@ -1105,7 +1221,7 @@ pipeline {
         stage('Lint') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     mkdir -p reports
                     "$VENV/bin/ruff" check . \
                         --output-format=junit \
@@ -1117,7 +1233,7 @@ pipeline {
         stage('Test') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     mkdir -p reports
                     "$VENV/bin/pytest" \
                         --junitxml=reports/junit-tests.xml \
@@ -1148,7 +1264,9 @@ Key points:
   and Kubernetes pod.
 - **Each `sh` step is a separate shell process.** A venv `activate`d in one step is gone in the
   next. That's why the examples call `"$VENV/bin/..."` explicitly — more robust than re-activating
-  everywhere. (Alternative: set `PATH = "${VENV}/bin:${PATH}"` in `environment`.)
+  everywhere. (Alternative: wrap steps in `withEnv(["PATH+VENV=${env.VENV}/bin"]) { ... }`.
+  Jenkins' `PATH+NAME` form *prepends* to the agent's `PATH` instead of replacing it — safer than
+  rebuilding `PATH` by hand, where one typo leaves the agent with no `sh` or `git`.)
 - **`PYTHONPATH = "${WORKSPACE}"`** so `import app` resolves from a venv that never installed your
   project. **Nuance worth knowing:** if `tests/` contains an `__init__.py`, pytest inserts the repo
   root into `sys.path` on its own and the import works without `PYTHONPATH`. Delete that
@@ -1171,7 +1289,7 @@ Key points:
         stage('Package') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     "$VENV/bin/pip" install build
                     "$VENV/bin/python" -m build --wheel --outdir dist/
                     ls -l dist/
@@ -1236,7 +1354,7 @@ which build produced a running container.
         stage('Smoke test') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
 
                     PORT=$((8000 + ${EXECUTOR_NUMBER:-0}))
                     "$VENV/bin/python" -m app.main --port "$PORT" &
@@ -1348,9 +1466,13 @@ graphs. Optional quality gates can mark the build unstable below a threshold:
 ```groovy
 recordCoverage(
     tools: [[parser: 'COBERTURA', pattern: 'reports/coverage.xml']],
-    qualityGates: [[threshold: 15.0, metric: 'LINE', baseline: 'PROJECT', unstable: true]]
+    qualityGates: [[threshold: 15.0, metric: 'LINE', baseline: 'PROJECT', criticality: 'UNSTABLE']]
 )
 ```
+
+`criticality` decides what a missed gate does to the build: `UNSTABLE` (yellow) or `FAILURE` (red),
+plus `NOTE` (report only) and `ERROR` in pipelines. The step's documented parameters have no
+`unstable: true` flag; use `criticality`.
 
 > **⚠️ Pick a threshold that matches your project.** The Appendix C sample scores about **19%**,
 > because `app/main.py` (the HTTP server) has no unit tests — only the smoke test exercises it. A
@@ -1359,12 +1481,12 @@ recordCoverage(
 
 ### Pipeline visualization
 
-**Stage View** is built in (part of the suggested plugin set): stages as columns, runs as rows,
-per-stage duration, hover for logs. Enough for most people.
+**Pipeline Graph View** is what a fresh install gives you (it's in the suggested plugin set): a
+graph of stages inside the normal Jenkins UI, with parallel and nested stages drawn properly, a
+**Stages** view per build, and per-stage logs. Enough for almost everyone.
 
-**Pipeline Graph View** is the recommended addition — a modern graph rendering inside the normal
-Jenkins UI that handles parallel and nested stages far better. Install via **Manage Jenkins →
-Plugins → Available**.
+**Pipeline: Stage View** is the older grid — stages as columns, runs as rows. It was dropped from
+the setup wizard in 2024 in favor of Graph View. Install it only if you specifically want the grid.
 
 > **Blue Ocean is not the answer any more.** Older tutorials — including most of the popular video
 > ones — send you to Blue Ocean. It has been in maintenance-only status for years and is no longer
@@ -1394,7 +1516,12 @@ System**; without it the step itself fails and turns an informative failure into
 | `Multiple top-level packages discovered` | setuptools found both `app` and `tests` and won't guess | Add `[tool.setuptools.packages.find]` with `include = ["app*"]` |
 | `pip install -r requirements.txt` fails, file not found | The file doesn't exist — an empty one is still required | Commit an empty `requirements.txt` with a comment in it |
 | `python -m build` fails with a network error | Build isolation downloads setuptools/wheel | Allow network, or use `--no-isolation` with them pre-installed |
-| Build is green but tested nothing | `pytest` exited 5 (no tests collected) and nothing checked | Add `set -euo pipefail`; verify the test path; set `allowEmptyResults: false` |
+| Build is green but tested nothing | A shebang turned off Jenkins' default `-e`, so `pytest`'s exit 5 (no tests collected) was ignored | Add `set -xeuo pipefail` after the shebang; verify the test path; set `allowEmptyResults: false` |
+| No `+` command lines in Console Output | The step starts with a shebang, so Jenkins no longer adds `-x` | Add `set -x` (or `set -xeuo pipefail`) after the shebang |
+| Docker agent container starts, but the build waits forever and the agent never comes online | Agent container dials `localhost:8080`, which is the container itself | Template **Network** = `jenkins`, **Jenkins URL** = `http://jenkins:8080/` (Section 11) |
+| `when { expression { env.GIT_BRANCH ... } }` is always false | Pipeline uses `skipDefaultCheckout(true)`; an explicit `checkout scm` returns `GIT_*` as a map, it doesn't set `env` | Copy the values into `env` yourself (Section 16) |
+| `No such DSL method 'lock'` | **Lockable Resources** plugin not installed | Install it (Manage Jenkins → Plugins) |
+| `Scripts not permitted to use method ...` | The Groovy sandbox blocked a call | Prefer a step that does the job; approve under **In-process Script Approval** only if you understand it (Section 24) |
 | Tests failed but the build is red, not yellow | The stage failed before `junit` could downgrade it | Wrap the test step in `catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE')` |
 | Coverage gate fails on a correct build | Threshold set higher than the project's actual coverage | Lower the threshold to match reality, then ratchet up |
 | `junit` reports a malformed/empty report | `tool > file` truncated the file before the tool crashed | Use the tool's native `--output-file` flag |
@@ -1408,12 +1535,12 @@ System**; without it the step itself fails and turns an informative failure into
 | A stage is always skipped and never errors | `when { branch 'main' }` in a plain Pipeline job — `BRANCH_NAME` is unset | Use a Multibranch Pipeline, or gate on `env.GIT_BRANCH` |
 | `Bad substitution` in a shell step | The step ran under `/bin/sh`, not bash | Put `#!/usr/bin/env bash` as the very first characters inside `'''` |
 | Files from a previous build present in workspace | Workspaces persist by default | **Delete workspace before build starts** / `cleanWs()` |
-| Two concurrent builds fight over a port or device | Shared agent, hardcoded resource | Derive from `EXECUTOR_NUMBER`, use `lock()`, or set the node to 1 executor |
+| Two concurrent builds fight over a port or device | Shared agent, hardcoded resource | Derive from `EXECUTOR_NUMBER`, use `lock()` (Lockable Resources plugin, Section 25), or set the node to 1 executor |
 | Downstream stages fail despite correct syntax | An upstream stage failed | Fix the upstream stage first |
 | Console output appears duplicated | The `+` line is the command; the next is its output | Not a bug |
 | Pipeline changes have no effect | Editing the wrong file when using Pipeline-from-SCM | The Jenkinsfile **in Git** is the source of truth — commit and push |
 | Unexpected "Declarative: Checkout SCM" stage | Pipeline-from-SCM auto-adds the clone | Expected behavior |
-| Stage View history disappeared | A stage was added, so the visualization re-baselines | Cosmetic; builds still exist |
+| Stage graph / Stage View history looks different after editing stages | Each build shows the stages it ran; the old Stage View grid re-baselines | Cosmetic; builds still exist |
 | `triggers {}` in the Jenkinsfile never fires | Jenkins hasn't read the file yet | Run the job manually once |
 | Webhook fires but no build starts | The job's Git URL doesn't match the pushed repository | Make the SCM URL and the webhook repository the same |
 | Scheduled job runs far less often than expected | `H * * * *` is **hourly**, not per-minute | Use `H/5 * * * *` for every 5 minutes |
@@ -1474,6 +1601,748 @@ System**; without it the step itself fails and turns an informative failure into
 - **No spaces in job names** — they become directory names.
 - **Descriptive labels that name a capability** (`python3`, `hw-nvme-tester`, `windows-msvc`), not
   a machine (`server-04`). Machines get replaced; capabilities persist.
+
+---
+
+## 21. Credentials in depth
+
+Section 10 said "add a credential". This is what that actually involves.
+
+### Kinds of credential
+
+**Manage Jenkins → Credentials → System → Global credentials → Add Credentials.**
+
+| Kind | Use it for | Binds in a pipeline as |
+|---|---|---|
+| **Secret text** | API tokens, webhook secrets | one variable with the token |
+| **Username with password** | Registries, artifact servers, Git over HTTPS with a personal access token | user + password variables |
+| **SSH Username with private key** | Git over SSH, deploying to a box, permanent SSH agents | a temp key file + user |
+| **Secret file** | A kubeconfig, a firmware **signing key**, a license file | a temp file path |
+| **Certificate** | Client TLS certificates (PKCS#12) | keystore file + password |
+
+Give each one a meaningful **ID** (`artifactory-ci`, `fw-signing-key`) — the ID is what pipelines
+reference, and you can't rename it later without editing every Jenkinsfile.
+
+### Scope: Global vs System
+
+| Scope | Who can use it |
+|---|---|
+| **Global** | Jobs *and* Jenkins itself. What pipelines need. |
+| **System** | **Only Jenkins itself** — e.g. the SSH key Jenkins uses to launch an agent. Jobs can't see it. |
+
+A pipeline that says `Could not find credentials entry with ID ...` while the credential obviously
+exists is very often a **System**-scoped credential.
+
+> **Folder-scoped credentials.** A Folder has its own **Credentials** page. Credentials stored there
+> are visible only to jobs inside that folder — the right home for a team's or a project's
+> secrets. Prefer this over piling everything into the global store.
+
+### Using them in a pipeline
+
+```groovy
+// Secret text
+withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_TOKEN')]) {
+    sh 'curl -fsS -H "Authorization: Bearer $SLACK_TOKEN" https://slack.com/api/auth.test'
+}
+
+// Username + password
+withCredentials([usernamePassword(credentialsId: 'artifactory-ci',
+                                  usernameVariable: 'ART_USER',
+                                  passwordVariable: 'ART_PASS')]) {
+    sh 'curl -fsS -u "$ART_USER:$ART_PASS" -T dist/app.whl https://artifacts.example.com/pypi/'
+}
+
+// SSH private key — Git over SSH without the SSH Agent plugin
+withCredentials([sshUserPrivateKey(credentialsId: 'deploy-key', keyFileVariable: 'KEY')]) {
+    sh 'GIT_SSH_COMMAND="ssh -i $KEY -o StrictHostKeyChecking=accept-new" git push origin HEAD:release'
+}
+
+// Secret file — e.g. signing a firmware image
+withCredentials([file(credentialsId: 'fw-signing-key', variable: 'SIGN_KEY')]) {
+    sh './tools/sign_image.sh --key "$SIGN_KEY" build/firmware.bin'
+}
+```
+
+All four follow the Section 13 rule: **single-quoted `sh`**, so the shell reads the secret from the
+environment and Groovy never bakes it into the command line.
+
+> **The file and key variants write a temporary file** into the workspace area and delete it when
+> the block ends. Keep everything that needs the secret *inside* the block.
+
+The `environment { X = credentials('id') }` shortcut from Section 13 works for every kind above.
+For a username/password it binds `X` (as `user:pass`), `X_USR`, and `X_PSW`; for an SSH key, `X` is
+the key file path.
+
+> **The Snippet Generator** (`/pipeline-syntax/`, sample step **withCredentials**) produces the
+> exact binding syntax for each kind — easier than remembering parameter names.
+
+---
+
+## 22. Multibranch Pipelines, hands-on
+
+Section 15 called Multibranch "the destination". Here is the setup.
+
+### Create it
+
+**New Item** → `jenkins-sample-mb` → **Multibranch Pipeline** → OK.
+
+| Setting | Value | Notes |
+|---|---|---|
+| **Branch Sources → Add source** | **GitHub** (or plain **Git** for other hosts) | GitHub Branch Source is in the suggested plugin set |
+| **Credentials** | A GitHub App or username + personal access token | Use one **even for a public repo**: unauthenticated GitHub API calls are heavily rate-limited, and scans start failing |
+| **Repository HTTPS URL** | `https://github.com/<you>/jenkins-sample` | |
+| **Behaviors** | *Discover branches*, *Discover pull requests from origin*, *Discover pull requests from forks* | Defaults are sensible |
+| **Build Configuration** | Mode *by Jenkinsfile*, Script Path `Jenkinsfile` | |
+| **Scan Multibranch Pipeline Triggers** | *Periodically if not otherwise run*, e.g. 1 day | A safety net only — webhooks do the fast part |
+| **Orphaned Item Strategy** | Discard old items | Removes jobs for deleted branches |
+
+Save. Jenkins **scans** the repository and creates one child job per branch and pull request that
+contains a Jenkinsfile. The scan log (**Scan Repository Log**) explains why a branch was or wasn't
+picked up — read it before anything else when a branch is missing.
+
+### Webhooks
+
+Use the same `http://<your-jenkins>/github-webhook/` URL as Section 12, and in GitHub tick the
+**Pushes** and **Pull requests** events. A push triggers a re-scan of that branch, which starts the
+build. No trigger configuration in the Jenkinsfile is needed.
+
+### What you get
+
+| Variable | Meaning |
+|---|---|
+| `BRANCH_NAME` | Branch name, or `PR-42` for a pull request |
+| `CHANGE_ID` | PR number (unset on branch builds) |
+| `CHANGE_TARGET` | The branch the PR wants to merge into |
+| `CHANGE_BRANCH` | The PR's source branch |
+| `CHANGE_AUTHOR` | The PR author's username |
+
+And the `when` conditions that need them:
+
+```groovy
+when { branch 'main' }                     // a specific branch
+when { branch 'release/*' }                // glob
+when { changeRequest() }                   // any pull request
+when { changeRequest target: 'main' }      // PRs into main
+when { buildingTag() }                     // a tag build (see below)
+when { not { changeRequest() } }           // branch builds only
+```
+
+> **PRs are built *merged*.** By default *Discover pull requests from origin* builds the PR merged
+> with its target branch — what `main` would look like after merging. That's the build you want to
+> gate a merge on.
+
+> **Forks can't change your pipeline.** For a PR from a fork whose author lacks write access,
+> Jenkins uses the Jenkinsfile **from the target branch**, not from the PR. Otherwise anyone could
+> open a PR that runs arbitrary code on your agents with your credentials.
+
+> **Tags are discovered, not built.** Add the *Discover tags* behavior and tags appear as jobs, but
+> they don't build automatically. Automatic tag builds need the **Basic Branch Build Strategies**
+> plugin (*Build strategies → Tags*).
+
+> **Branch names become paths.** `feature/login` shows up in URLs as `feature%2Flogin` and in
+> `JOB_NAME` with the slash. Scripts that build file names from `BRANCH_NAME` should sanitize it.
+
+---
+
+## 23. More pipeline building blocks
+
+The pieces you'll reach for next, once the basics work.
+
+### Using parameters
+
+Section 13 declared parameters; reading them is `params.NAME`:
+
+```groovy
+stage('Slow tests') {
+    when { expression { params.RUN_SLOW_TESTS } }
+    steps { sh './scripts/test.sh --slow' }
+}
+```
+
+> **Same chicken-and-egg as triggers.** **Build with Parameters** appears only after a build has
+> read the `parameters` block. The first run after adding or changing parameters uses the old
+> definition.
+
+### More `when` conditions
+
+```groovy
+when { environment name: 'DEPLOY_TO', value: 'prod' }
+when { changeset 'firmware/**' }               // files changed since the previous build
+when { triggeredBy 'TimerTrigger' }            // only on the nightly schedule
+when { allOf { branch 'main'; not { changeRequest() } } }
+when { anyOf { branch 'main'; branch 'release/*' } }
+```
+
+> **`changeset` is empty on a branch's first build** (there is no previous build to diff against),
+> so the stage is skipped. Don't use it to gate anything that must run at least once.
+
+Order of evaluation matters for cost. By default `when` is checked *after* the stage's agent is
+allocated, its `input` answered, and its `options` (such as `lock`) acquired. Turn that around
+explicitly:
+
+```groovy
+when {
+    beforeAgent true      // don't allocate an agent just to skip the stage
+    beforeInput true      // don't ask a human about a stage that won't run
+    beforeOptions true    // don't take a lock for a stage that won't run
+    branch 'main'
+}
+```
+
+### `retry` and `timeout`
+
+```groovy
+stage('Fetch toolchain') {
+    options {
+        retry(3)                                  // retry the whole stage
+        timeout(time: 10, unit: 'MINUTES')        // per attempt
+    }
+    steps { sh './scripts/fetch_toolchain.sh' }
+}
+
+// or around a single step
+retry(3) { sh 'curl -fsSLO https://downloads.example.com/sdk.tar.gz' }
+```
+
+> **Retry infrastructure, not tests.** Retrying a flaky download or a dropped agent is reasonable.
+> Retrying a flaky *test* hides a real bug — sometimes a race condition in your firmware — behind a
+> green build.
+
+### `stash` / `unstash` — moving files between agents
+
+Each agent has its own workspace. To build on one agent and test on another (Section 25 does
+this), hand files across with a stash:
+
+```groovy
+stage('Build') {
+    agent { label 'arm-gcc' }
+    steps {
+        sh 'make'
+        stash name: 'firmware', includes: 'build/firmware.elf,build/firmware.bin'
+    }
+}
+stage('Test on hardware') {
+    agent { label 'hw-stm32f4' }
+    steps {
+        unstash 'firmware'
+        sh './tools/flash_and_test.sh build/firmware.elf'
+    }
+}
+```
+
+| | `stash` | `archiveArtifacts` |
+|---|---|---|
+| Purpose | Move files **within** one build | Keep files **after** the build |
+| Lifetime | Deleted when the build ends | Kept until `buildDiscarder` removes the build |
+| Visible in UI | No | Yes, downloadable |
+| Size | Small — it's copied through the controller | Small to moderate; large files go to an artifact repository |
+
+### `matrix` — the same stages across combinations
+
+```groovy
+stage('Build') {
+    matrix {
+        axes {
+            axis { name 'BOARD';      values 'stm32f4', 'stm32h7', 'nrf52' }
+            axis { name 'BUILD_TYPE'; values 'Debug', 'Release' }
+        }
+        excludes {
+            exclude {
+                axis { name 'BOARD';      values 'nrf52' }
+                axis { name 'BUILD_TYPE'; values 'Debug' }
+            }
+        }
+        agent { label 'arm-gcc' }
+        stages {
+            stage('Compile') {
+                steps { sh 'make BOARD=$BOARD BUILD_TYPE=$BUILD_TYPE' }
+            }
+        }
+    }
+}
+```
+
+This runs 3 × 2 − 1 = **5 cells in parallel**. Axis values arrive as environment variables. With an
+`agent` inside `matrix`, each cell gets its own agent and workspace — so it needs its own
+executor, and it doesn't collide with the others. Without one, the cells share the workspace, and
+each cell must write to its own output directory.
+
+### Build name and description
+
+```groovy
+script {
+    currentBuild.description = "BOARD=${params.BOARD} by ${env.CHANGE_AUTHOR ?: 'manual'}"
+}
+```
+
+Shows up in Build History, so you can find "the Release build for the H7" without opening each one.
+
+---
+
+## 24. Securing and operating the controller
+
+Running Jenkins for a team is mostly about these five things.
+
+### Who can do what
+
+**Manage Jenkins → Security** has two independent settings:
+
+- **Security Realm** — *who you are*: Jenkins' own user database to start; LDAP, Active Directory,
+  or SSO (SAML/OIDC plugins) in companies.
+- **Authorization** — *what you may do*. The wizard leaves *Logged-in users can do anything*. Move
+  to **Matrix-based security** as soon as more than one person uses the instance: grant `Overall/Read`
+  plus `Job/Build`, `Job/Read`, `Job/Cancel` to developers; keep `Overall/Administer` to a few
+  people. Untick **Allow anonymous read access**. For many teams, the **Role-based Authorization
+  Strategy** plugin scales better than a large matrix.
+
+> **Scripts use API tokens, not passwords.** Each user generates tokens under their own
+> **Security** page. A token can be revoked individually, and it never reveals the real password.
+> The `curl -u user:token` in Section 13 means *this*.
+
+### The Groovy sandbox and script approval
+
+Jenkinsfiles run in a **sandbox**: only approved Groovy methods may be called. A build that dies
+with `Scripts not permitted to use method ...` has hit it. An administrator can approve the method
+under **Manage Jenkins → In-process Script Approval**.
+
+> **🔒 Approving a signature is granting it to every pipeline on the controller.** Some — anything
+> touching `java.io.File`, `Runtime`, `Jenkins.instance`, or `getRawBuild` — amount to giving every
+> Jenkinsfile author admin rights. Prefer a pipeline step that already does the job (the Snippet
+> Generator lists them), or a trusted shared library (Section 26) that admins review.
+
+### Plugins
+
+- **Fewer is better.** Every plugin is attack surface and an upgrade risk. Uninstall what you don't
+  use.
+- **Read the security warnings.** Manage Jenkins shows a banner when an installed plugin has a
+  published vulnerability — act on it.
+- **Update deliberately**: read the changelog, update on a test copy first, keep the backup from
+  the step below.
+
+### Upgrades
+
+Jenkins LTS ships a new baseline roughly every 12 weeks, with point releases in between.
+
+1. **Back up `JENKINS_HOME`** (Appendix B).
+2. Read the **LTS upgrade guide** (jenkins.io/doc/upgrade-guide) for every LTS you're jumping over —
+   that's where Java changes like the Section 5 Java 17 removal are announced.
+3. For the Docker image: change the pinned tag, `docker pull`, then remove and recreate the
+   container with the same `docker run` command. The volume keeps all data.
+4. Update plugins afterward, then check **Manage Jenkins** for warnings and run a few key jobs.
+
+### Configuration as Code (JCasC)
+
+Everything so far was configured by clicking. The **Configuration as Code** plugin describes the
+controller in YAML instead — so a dead controller can be rebuilt in minutes, and config changes go
+through code review like everything else.
+
+```yaml
+# casc.yaml
+jenkins:
+  systemMessage: "Managed by JCasC — changes made in the UI will be overwritten"
+  numExecutors: 0                      # never build on the controller (Section 20)
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: admin
+          password: ${JENKINS_ADMIN_PASSWORD}   # read from an environment variable
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+unclassified:
+  location:
+    url: http://localhost:8080/
+```
+
+Bake the plugins and the YAML into your own controller image:
+
+```dockerfile
+FROM jenkins/jenkins:2.568.1-jdk21
+ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
+ENV CASC_JENKINS_CONFIG=/config/casc.yaml
+COPY plugins.txt /usr/share/jenkins/ref/plugins.txt
+RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
+COPY casc.yaml /config/casc.yaml
+```
+
+`plugins.txt` lists one plugin ID per line, optionally pinned as `id:version`.
+
+> **Don't `COPY` into `/var/jenkins_home`.** That path is the volume, which hides whatever the image
+> put there. Keep the YAML elsewhere and point `CASC_JENKINS_CONFIG` at it.
+
+> **Start from an export.** **Manage Jenkins → Configuration as Code → View Configuration** shows
+> your current, click-built setup as YAML. Copy the parts you need rather than writing them from
+> scratch.
+
+---
+
+## 25. A firmware pipeline: cross-compile, test, flash
+
+Everything up to here used Python because it's easy to set up. This section applies the same ideas
+to what firmware teams actually build: C code for a microcontroller, cross-compiled, size-checked,
+and tested on a real board.
+
+**Plugins needed beyond the suggested set:** **Lockable Resources** (`lock`) and **Warnings**
+(`recordIssues`, also called Warnings Next Generation).
+
+### Assumed project layout
+
+```
+firmware/
+├── Jenkinsfile
+├── CMakeLists.txt              # target build; links firmware.elf and writes firmware.map
+├── cmake/arm-none-eabi.cmake   # toolchain file
+├── src/                        # firmware sources
+├── tests/                      # host-side unit tests (own CMakeLists.txt, registers tests with CTest)
+└── tools/hil_runner.py         # reads test results from the board's UART
+```
+
+### The build agent image
+
+```dockerfile
+# Dockerfile.arm-agent
+FROM jenkins/inbound-agent:latest-jdk21   # pin it — see Section 11
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      gcc-arm-none-eabi libnewlib-arm-none-eabi \
+      build-essential cmake ninja-build cppcheck git \
+ && rm -rf /var/lib/apt/lists/*
+USER jenkins
+```
+
+```bash
+docker build -t jenkins-agent-arm:1.0 -f Dockerfile.arm-agent .
+docker run --rm --entrypoint sh jenkins-agent-arm:1.0 -c \
+  'arm-none-eabi-gcc --version && cmake --version && cppcheck --version && echo TOOLCHAIN_OK'
+```
+
+Register it as a Docker template with the label **`arm-gcc`** (Section 11).
+
+> **Pin the compiler as seriously as the code.** A different `arm-none-eabi-gcc` can change code
+> size, timing, and even behavior around undefined behavior. The image tag *is* your compiler
+> version — record it, and bump it deliberately with a full regression run.
+
+### The hardware agent
+
+A real machine — a lab PC or a Raspberry Pi — with the board plugged in over USB, set up as a
+**permanent agent** (Section 11):
+
+- Label **`hw-stm32f4`**, **1 executor**, usage *Only build jobs with matching label expressions*.
+- `openocd` and `python3` + `python3-venv` installed.
+- The agent user can open the debug probe and serial port: on Linux, add it to the `dialout`
+  group and install the ST-Link udev rules.
+
+### The Jenkinsfile
+
+```groovy
+pipeline {
+    agent none
+
+    parameters {
+        booleanParam(name: 'RUN_HIL', defaultValue: true, description: 'Flash and test on the real board')
+    }
+
+    options {
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '20'))
+        timestamps()
+    }
+
+    stages {
+        stage('Static analysis + host unit tests') {
+            agent { label 'arm-gcc' }
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -xeuo pipefail
+                    mkdir -p reports
+
+                    cppcheck --enable=warning,style,performance --inline-suppr \
+                        --error-exitcode=1 --xml --output-file=reports/cppcheck.xml src/
+
+                    cmake -S tests -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Debug
+                    cmake --build build/host
+                    ctest --test-dir build/host --output-on-failure \
+                        --output-junit "$WORKSPACE/reports/junit-host.xml"
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'reports/junit-host.xml'
+                    recordIssues(tools: [cppCheck(pattern: 'reports/cppcheck.xml')])
+                }
+            }
+        }
+
+        stage('Firmware builds') {
+            matrix {
+                axes {
+                    axis { name 'TARGET';     values 'stm32f4', 'stm32h7' }
+                    axis { name 'BUILD_TYPE'; values 'Debug', 'Release' }
+                }
+                agent { label 'arm-gcc' }
+                stages {
+                    stage('Compile') {
+                        steps {
+                            sh '''#!/usr/bin/env bash
+                                set -xeuo pipefail
+                                OUT="build/${TARGET}-${BUILD_TYPE}"
+
+                                cmake -S . -B "$OUT" -G Ninja \
+                                    -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
+                                    -DBOARD="$TARGET" \
+                                    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+                                    -DFW_BUILD_ID="$BUILD_NUMBER"
+                                cmake --build "$OUT"
+
+                                arm-none-eabi-objcopy -O binary "$OUT/firmware.elf" "$OUT/firmware.bin"
+                                arm-none-eabi-objcopy -O ihex   "$OUT/firmware.elf" "$OUT/firmware.hex"
+                            '''
+                        }
+                    }
+                    stage('Size budget') {
+                        steps {
+                            sh '''#!/usr/bin/env bash
+                                set -xeuo pipefail
+                                ELF="build/${TARGET}-${BUILD_TYPE}/firmware.elf"
+
+                                case "$TARGET" in
+                                    stm32f4) LIMIT=$((1024 * 1024)) ;;
+                                    stm32h7) LIMIT=$((2048 * 1024)) ;;
+                                    *) echo "no flash budget for $TARGET" >&2; exit 1 ;;
+                                esac
+
+                                arm-none-eabi-size "$ELF"
+                                read -r TEXT DATA BSS _ < <(arm-none-eabi-size "$ELF" | tail -n 1)
+                                FLASH=$((TEXT + DATA))   # .data's initial values live in flash too
+                                echo "flash: ${FLASH} / ${LIMIT} bytes, RAM (data+bss): $((DATA + BSS)) bytes"
+
+                                if [ "$FLASH" -gt "$LIMIT" ]; then
+                                    echo "flash budget exceeded" >&2
+                                    exit 1
+                                fi
+                            '''
+                        }
+                    }
+                }
+                post {
+                    success {
+                        archiveArtifacts artifacts: "build/${TARGET}-${BUILD_TYPE}/firmware.*", fingerprint: true
+                        stash name: "fw-${TARGET}-${BUILD_TYPE}", includes: "build/${TARGET}-${BUILD_TYPE}/firmware.elf"
+                    }
+                }
+            }
+        }
+
+        stage('Hardware-in-the-loop test') {
+            when {
+                beforeAgent true
+                beforeOptions true
+                expression { params.RUN_HIL }
+            }
+            options {
+                lock(resource: 'stm32f4-board-01')   // taken BEFORE the agent: waiting holds no executor
+                timeout(time: 10, unit: 'MINUTES')   // hardware hangs; don't hold the board forever
+            }
+            agent { label 'hw-stm32f4' }
+            steps {
+                unstash 'fw-stm32f4-Release'
+                sh '''#!/usr/bin/env bash
+                    set -xeuo pipefail
+                    mkdir -p reports
+
+                    openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
+                        -c "program build/stm32f4-Release/firmware.elf verify reset exit"
+
+                    python3 -m venv .venv
+                    .venv/bin/pip install pyserial==3.5
+                    .venv/bin/python tools/hil_runner.py --port /dev/ttyACM0 \
+                        --timeout 60 --junit reports/junit-hil.xml
+                '''
+            }
+            post {
+                always { junit allowEmptyResults: true, testResults: 'reports/junit-hil.xml' }
+                cleanup { cleanWs() }
+            }
+        }
+    }
+}
+```
+
+What each piece is doing — and why it maps to real firmware concerns:
+
+- **Host unit tests first.** Logic that doesn't touch registers (parsers, state machines, CRCs) is
+  compiled with the *host* compiler and tested in seconds. It's the fail-fast stage.
+- **`cppcheck --output-file`** — the same "native output flag, not `>`" rule as ruff in Section 17.
+  `recordIssues` turns the XML into a per-file warnings view with trends.
+- **`matrix`** builds every board × build type in parallel, each cell on its own `arm-gcc` agent
+  (Section 23). The separate `build/<target>-<type>` directories also keep the archived file names
+  distinct.
+- **`FW_BUILD_ID`** bakes the Jenkins build number into the image (the CMake file turns it into a
+  `-D` define). When a board in the field reports its version, you can find the exact build — and,
+  thanks to `fingerprint: true`, the exact file.
+- **Archive the `.elf` and `.map`, not just the `.bin`.** The `.bin` is what you flash; the `.elf`
+  (symbols) and `.map` are what you need months later to decode a crash address with
+  `arm-none-eabi-addr2line`. A crash dump from a build you can't symbolize is nearly useless.
+- **The size budget** fails the build the day a change pushes the image past the flash limit —
+  rather than the day someone tries to flash it. Use the real limit of your part, and consider a
+  margin for future features or bootloader space.
+- **`stash` → `unstash`** carries the Release image from the build agent to the lab machine
+  (separate workspaces, Section 23).
+- **`lock` as a stage option** is acquired before the agent is allocated, so a build waiting for
+  the board doesn't hold an executor. With one board and one single-executor agent, the agent alone
+  already serializes builds; `lock` earns its keep once **several jobs or agents** share a board —
+  a nightly regression and PR builds, say — or a stage needs **two** devices at once.
+- **`beforeOptions true`** means a build with `RUN_HIL=false` skips the stage without ever taking
+  the lock.
+
+### The HIL runner
+
+The firmware runs its on-target tests after reset and reports one line per test over UART. The
+runner turns that into JUnit XML, so hardware results show up in **Test Result** like any other
+test.
+
+```python
+"""Collect on-target test results from a UART and write a JUnit XML report.
+
+Protocol, one line each:
+    TEST <name> PASS
+    TEST <name> FAIL <message>
+    TESTS DONE
+The firmware waits for a 'G' byte before starting, so no output is lost while the port opens.
+"""
+
+import argparse
+import time
+import xml.etree.ElementTree as ET
+
+import serial
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", required=True)
+    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--junit", required=True)
+    args = parser.parse_args()
+
+    suite = ET.Element("testsuite", name="hil")
+    total = failures = 0
+
+    with serial.Serial(args.port, args.baud, timeout=1) as port:
+        port.reset_input_buffer()
+        port.write(b"G")                       # tell the firmware to start
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            line = port.readline().decode(errors="replace").strip()
+            if not line:
+                continue
+            print(line, flush=True)            # board output goes into the build log
+            if line == "TESTS DONE":
+                break
+            parts = line.split(maxsplit=3)
+            if len(parts) >= 3 and parts[0] == "TEST":
+                total += 1
+                case = ET.SubElement(suite, "testcase", classname="hil", name=parts[1])
+                if parts[2] != "PASS":
+                    failures += 1
+                    message = parts[3] if len(parts) > 3 else parts[2]
+                    ET.SubElement(case, "failure", message=message)
+        else:                                  # loop ran out of time without "TESTS DONE"
+            total += 1
+            failures += 1
+            case = ET.SubElement(suite, "testcase", classname="hil", name="completion")
+            ET.SubElement(case, "failure", message=f"no 'TESTS DONE' within {args.timeout}s")
+
+    suite.set("tests", str(total))
+    suite.set("failures", str(failures))
+    ET.ElementTree(suite).write(args.junit, encoding="utf-8", xml_declaration=True)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+> **A hang is a failure, not a timeout.** If the board crashes mid-run, the runner still writes a
+> report with a `completion` failure, so the build says *what* happened instead of just "timed
+> out".
+
+> **Policy question for HIL:** should a HIL failure turn the build red, or yellow? Hardware stages
+> fail for physical reasons too (a loose cable, a probe that needs re-plugging). Many teams wrap
+> HIL in `catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE')` so a bench problem doesn't
+> block merges — but then *someone must look at yellow builds*. Decide, and write it down
+> (Section 20).
+
+---
+
+## 26. Shared Libraries
+
+Once three repositories have the same 150-line Jenkinsfile, fixing a bug means three PRs. A
+**Shared Library** is a Git repository of Groovy code that pipelines load, so the common logic
+lives in one place.
+
+### Layout
+
+```
+jenkins-shared-lib/
+└── vars/
+    └── venvSh.groovy     # becomes a step named venvSh
+```
+
+Every `vars/<name>.groovy` with a `call` method becomes a step called `<name>`:
+
+```groovy
+// vars/venvSh.groovy
+// Run a shell snippet with the workspace venv activated.
+def call(String script) {
+    sh """#!/usr/bin/env bash
+set -xeuo pipefail
+source "\${WORKSPACE}/.venv/bin/activate"
+${script}
+"""
+}
+```
+
+Note the deliberate mix from Section 13: `\${WORKSPACE}` is escaped so **the shell** expands it,
+while `${script}` is interpolated by **Groovy** on purpose — it's the code passed in. Never pass a
+secret this way.
+
+### Register and use it
+
+**Manage Jenkins → System → Global Trusted Pipeline Libraries** (labeled *Global Pipeline
+Libraries* in older versions) → Add:
+
+- **Name:** `my-shared-lib`
+- **Default version:** `main` (or a tag)
+- **Retrieval method:** Modern SCM → Git → the library repository URL
+
+Then in any Jenkinsfile:
+
+```groovy
+@Library('my-shared-lib@v1.0.0') _
+
+pipeline {
+    agent { label 'docker-agent-python' }
+    stages {
+        stage('Test') {
+            steps { venvSh 'pytest -q' }
+        }
+    }
+}
+```
+
+The `_` after the annotation is required syntax — the annotation needs something to attach to.
+
+> **Pin the library version** (`@v1.0.0`) the same way you pin images. With the default branch,
+> a library change silently changes every pipeline that uses it, all at once.
+
+> **🔒 A trusted library runs outside the sandbox** (Section 24), with full controller privileges.
+> Whoever can push to that repository effectively administers Jenkins. Protect the branch and
+> review library changes as carefully as changes to Jenkins itself.
 
 ---
 
@@ -1544,7 +2413,8 @@ git push -u origin main
 ```
 
 **Before pushing, run it locally.** Always confirm the project works outside Jenkins before blaming
-Jenkins — this is far faster than a four-minute build cycle:
+Jenkins — this is far faster than a four-minute build cycle. (These are bash commands; on Windows
+run them in WSL or Git Bash — see [Appendix D](#appendix-d--windows-and-docker-desktop).)
 
 ```bash
 python3 -m venv .venv
@@ -1582,12 +2452,12 @@ Don't just look for green. Confirm each capability independently:
 |---|---|---|
 | Checkout worked | Console Output | `Obtained Jenkinsfile from git`, then the `git log -1` line |
 | Environment built | Console Output | `pip list` shows pytest, ruff, coverage |
-| Lint ran | **Test Result** | A `ruff` suite appears |
-| Tests ran | **Test Result** | 3 tests, 3 passed |
+| Lint ran | **Test Result** | A `ruff` suite with one passing case, `No errors found` |
+| Tests ran | **Test Result** | **4 tests, 4 passed** — the 3 pytest tests plus ruff's `No errors found` case |
 | Coverage parsed | **Coverage** on the build page | ~19% and a per-file table |
 | Artifact archived | **Build Artifacts** | `jenkins_sample-0.1.0-py3-none-any.whl` downloadable |
 | Smoke test passed | Console Output | `app is up on port 8000` |
-| Stage view renders | Job page | Checkout → Set up → Checks (parallel) → Package → Smoke test |
+| Stage graph renders | Build page → **Stages** | Checkout → Set up environment → Checks (Lint ‖ Test) → Package → Smoke test |
 
 ### 7. Prove the failure paths too
 
@@ -1673,7 +2543,7 @@ pipeline {
         stage('Build') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     echo "building"
                 '''
             }
@@ -1851,7 +2721,9 @@ build==1.5.0
 >
 > These versions require **Python 3.10 or newer** (pytest 9, `build`, and coverage.py all dropped
 > 3.9). If your agent only has Python 3.9, pin the older lines instead: `pytest==8.3.5`,
-> `pytest-cov==6.2.1`.
+> `pytest-cov==6.2.1` — and see the *Adapting it* table for the matching `pyproject.toml` changes.
+> Better still, upgrade the agent: Python 3.9 reached end of life in October 2025 and no longer gets
+> security fixes.
 
 ### `pyproject.toml`
 
@@ -1951,7 +2823,7 @@ pipeline {
         stage('Set up environment') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
 
                     python3 -m venv "$VENV"
                     "$VENV/bin/python" -m pip install --upgrade pip
@@ -1968,7 +2840,7 @@ pipeline {
                 stage('Lint') {
                     steps {
                         sh '''#!/usr/bin/env bash
-                            set -euo pipefail
+                            set -xeuo pipefail
                             mkdir -p reports
                             "$VENV/bin/ruff" check . \
                                 --output-format=junit \
@@ -1979,7 +2851,7 @@ pipeline {
                 stage('Test') {
                     steps {
                         sh '''#!/usr/bin/env bash
-                            set -euo pipefail
+                            set -xeuo pipefail
                             mkdir -p reports
                             "$VENV/bin/pytest" \
                                 --junitxml=reports/junit-tests.xml \
@@ -1995,7 +2867,7 @@ pipeline {
         stage('Package') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
                     "$VENV/bin/pip" install build
                     "$VENV/bin/python" -m build --wheel --outdir dist/
                     ls -l dist/
@@ -2006,7 +2878,7 @@ pipeline {
         stage('Smoke test') {
             steps {
                 sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+                    set -xeuo pipefail
 
                     PORT=$((8000 + ${EXECUTOR_NUMBER:-0}))
                     "$VENV/bin/python" -m app.main --port "$PORT" &
@@ -2056,6 +2928,116 @@ pipeline {
 | Want failing tests yellow, not red | Wrap the pytest `sh` in `catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE')` |
 | Want to add a Docker image build | See Section 17, Stage 3 — needs the Docker Pipeline plugin and a `docker` CLI on the agent |
 | Use `main` vs `master` | Set **Branch Specifier** to match |
-| Are on Python 3.9 | Pin `pytest==8.3.5`, `pytest-cov==6.2.1`, and set `requires-python = ">=3.9"` |
+| Are on Python 3.9 | Pin `pytest==8.3.5`, `pytest-cov==6.2.1`; in `pyproject.toml` set `requires-python = ">=3.9"` **and** `[tool.ruff] target-version = "py39"` — otherwise ruff's `UP` rules suggest 3.10-only syntax (`X \| Y` unions) that then fails at runtime on 3.9 |
+| Need the `GIT_*` variables (e.g. a `when` on `GIT_BRANCH`) | Capture them from `checkout scm` — see Section 16 |
+| Develop on Windows | See [Appendix D](#appendix-d--windows-and-docker-desktop), especially line endings |
+
+---
+
+## Appendix D — Windows and Docker Desktop
+
+Every command in this document is written for **bash**. On Windows you have two choices.
+
+### Option 1 (recommended): WSL2
+
+Install WSL2 with Ubuntu, and enable Docker Desktop's **WSL2 backend** plus *Settings → Resources →
+WSL integration* for that distro. Open the Ubuntu terminal, and **every command in this document
+works unchanged**, including `getent`, `sed -i`, `kill %1`, and `$(date +%F)`.
+
+> Keep the repository inside the WSL filesystem (`~/src/...`), not under `/mnt/c/...`. Builds there
+> are much faster, and you avoid the line-ending and permission problems below.
+
+### Option 2: PowerShell
+
+The differences that matter:
+
+| bash | PowerShell |
+|---|---|
+| `\` at end of line | `` ` `` (backtick) at end of line |
+| `"$PWD"` | `"${PWD}"` |
+| `$(command)` runs on *your* machine | `$(...)` means something different — wrap the command in `sh -c '...'` so it runs inside the container |
+| `source .venv/bin/activate` | `.venv\Scripts\Activate.ps1` |
+| `python3` | `py -3` or `python` |
+
+**Run Jenkins (Section 5), with the Docker socket for Section 11:**
+
+```powershell
+docker network create jenkins
+
+docker run -d --name jenkins `
+  --network jenkins `
+  --restart unless-stopped `
+  -p 8080:8080 -p 50000:50000 `
+  -v jenkins_home:/var/jenkins_home `
+  -v /var/run/docker.sock:/var/run/docker.sock `
+  jenkins/jenkins:lts-jdk21
+```
+
+Yes, `/var/run/docker.sock` is right even on Windows — Docker Desktop exposes the socket at that
+path to Linux containers. Then find the socket's group and add it, as in Section 11:
+
+```powershell
+docker exec jenkins ls -ln /var/run/docker.sock
+# note the group ID (4th column), then: docker rm -f jenkins
+# and re-run the docker run above with:  --group-add <that GID>  added before the image name
+```
+
+**Back up the volume (Appendix B):**
+
+```powershell
+docker run --rm `
+  -v jenkins_home:/source:ro `
+  -v "${PWD}:/backup" `
+  alpine sh -c 'tar czf /backup/jenkins-backup-$(date +%F).tar.gz -C /source .'
+```
+
+The single quotes stop PowerShell from touching `$(date +%F)`; `sh` inside the container expands it.
+
+### Line endings: the Windows-specific CI failure
+
+Git for Windows usually checks files out with **CRLF** line endings. Commit a shell script from
+there and a Linux agent tries to run `bash\r`:
+
+```
+/usr/bin/env: 'bash\r': No such file or directory
+```
+
+Stop it at the repository level with a `.gitattributes` file, committed once:
+
+```gitattributes
+*.sh         text eol=lf
+*.py         text eol=lf
+Jenkinsfile  text eol=lf
+Dockerfile*  text eol=lf
+*.groovy     text eol=lf
+```
+
+To fix files that are already committed with CRLF: `git add --renormalize .` and commit.
+
+### OneDrive-synced folders
+
+If your repository lives under a OneDrive-synced folder (for example `Desktop` with OneDrive
+backup turned on), every local `.venv`, `build/`, and `dist/` gets uploaded too. That's thousands
+of small files, and OneDrive sometimes locks files mid-build. Keep working copies outside OneDrive,
+or at least make sure those directories are in `.gitignore` *and* excluded from sync.
+
+### Windows build agents
+
+A Windows agent runs **`bat`** or **`powershell`** steps; `sh` works there only if Git for
+Windows' `sh.exe` is on the agent's `PATH`. For one Jenkinsfile that targets both:
+
+```groovy
+script {
+    if (isUnix()) {
+        sh './scripts/build.sh'
+    } else {
+        powershell '.\\scripts\\build.ps1'
+    }
+}
+```
+
+For firmware toolchains that only exist on Windows (some vendor IDEs and flash utilities), this
+is the normal setup: a permanent Windows agent with a label such as `windows-vendor-ide`, and only
+the stages that need it run there.
 
 ---
