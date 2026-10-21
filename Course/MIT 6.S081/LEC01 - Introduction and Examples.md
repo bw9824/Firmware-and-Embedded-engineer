@@ -1,31 +1,23 @@
-# LEC01 - Introduction and Examples
-
-## Big Picture
-- The OS lets many programs share one computer safely and conveniently.
-- Programs reach the kernel's services only through **system calls**.
-- The Unix interface is simple (integers + byte buffers), but its pieces **combine** into powerful features like I/O redirection.
-
----
 
 ## 1. Purposes of an OS
-| Purpose | Meaning |
-|---|---|
-| Abstract the hardware | Give apps processes and file systems instead of raw CPU/RAM/disk (convenience + portability) |
-| Multiplex | Run many programs (editor, compiler, DB) at the same time |
-| Isolation | Programs must not interfere unintentionally, even if buggy |
-| Sharing | ...but allow interaction when wanted (editor writes a file, compiler reads it) |
-| Security / access control | Prevent sharing when *not* wanted (other users can't read your files) |
-| Performance | Don't get in the way of apps using the hardware fully |
-| Range of uses | Same OS (e.g. Linux) runs laptops, games, DB servers, cloud |
+| Purpose                   | Meaning                                                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| Abstract the hardware     | Give apps processes and file systems instead of raw CPU/RAM/disk (convenience + portability) |
+| Multiplex                 | Run many programs (editor, compiler, DB) at the same time                                    |
+| Isolation                 | Programs must not interfere unintentionally, even if buggy                                   |
+| Sharing                   | ...but allow interaction when wanted (editor writes a file, compiler reads it)               |
+| Security / access control | Prevent sharing when *not* wanted (other users can't read your files)                        |
+| Performance               | Don't get in the way of apps using the hardware fully                                        |
+| Range of uses             | Same OS (e.g. Linux) runs laptops, games, DB servers, cloud                                  |
 
 ## 2. Classic OS Organization
 ```
-User space:   vi   cc   sh   ...          (processes)
+User: vi(text editor) cc(C compiler) sh(Shell) ... (processes)
 ----------------- system calls -----------------
-Kernel:       file system, processes, memory allocation,
-              access control, IPC, network stack, drivers...
+Kernel: file system, processes, memory allocation,
+              access control, TCP/IP, network stack, drivers...
 -------------------------------------------------
-Hardware:     CPU   RAM   disk   NIC
+Hardware: CPU   RAM   disk   Network
 ```
 - **Kernel** = special program that **boots first**, is always running, and is the "guardian" of hardware resources.
 - Kernel services: file system (file contents + name space/directories), **process** management (each running program has its own memory + share of CPU), memory allocation, access control.
@@ -47,9 +39,9 @@ pid = fork();                 // create a new process
 ## 4. Why OS Design Is Hard and Interesting
 - **Unforgiving environment**: you build the infrastructure everyone else assumes; underneath you is only hardware (QEMU helps).
 - **Design tensions**:
-  - Efficient (low-level, close to hardware) **vs** abstract, portable, easy to use
-  - Powerful services **vs** simple interfaces
-  - Flexible for programs **vs** secure (programs can't touch hardware or interfere)
+	- Efficient (low-level, close to hardware) **vs** abstract, portable, easy to use
+	- Powerful services **vs** simple interfaces
+	- Flexible for programs **vs** secure (programs can't touch hardware or interfere)
 - **Features interact**: e.g. `open` + `fork` — should the child see fds opened before `fork`? (Yes.)
 - **Hardware and uses keep changing**: SSDs, multicore (pervasive for ~15 years), much faster networks → designs need rethinking.
 
@@ -71,9 +63,9 @@ exit(0);
 ```
 - **File descriptor** 0 = console input, 1 = console output (the **shell sets these up** before the program starts — a pervasive Unix convention).
 - `read(fd, buf, max)` returns:
-  - number of bytes read
-  - **0** at end of file
-  - **-1** on error
+	- number of bytes read
+	- **0** at end of file
+	- **-1** on error
 - `read`/`write` don't care about data format — just a **stream of 8-bit bytes**; interpretation is up to the app.
 
 > ⚠️ If you pass `max` larger than the buffer, the kernel happily writes past it (e.g. over the return address on the stack). C won't stop you — be careful, and **check syscall return values** (errors are usually -1).
@@ -86,13 +78,14 @@ write(fd, "ooo\n", 4);
 - `open` creates/opens a file, returns a **new file descriptor** (small integer, e.g. 3).
 - The fd **indexes a per-process table inside the kernel** that says what each fd refers to.
 - Each process has **its own fd space** → the same number can mean different files in different processes.
+- O_WRONLY: Write-only ; O_CREATE: Creates the file if it does not exist.
 
 ## 8. The Shell
 - Command-line interface, used for system management, file manipulation, development, scripting.
 - Typing `ls` = ask the shell to run the program in the **file** named `ls`.
 - **I/O redirection**:
-  - `ls > out` — output to file `out`
-  - `grep x < out` — input from file `out`
+	- `ls > out` — output to file `out`
+	- `grep x < out` — input from file `out`
 
 ## 9. fork — fork.c
 ```c
@@ -122,14 +115,14 @@ printf("exec failed!\n");
 
 ## 11. fork + exec + wait — forkexec.c
 ```c
-int pid = fork();
-if (pid == 0) {
-    exec("echo", argv);
+int pid = fork();             // From here on, there are two processes
+if (pid == 0) {               // The child process goes here
+    exec("echo", argv);       // It becomes echo, printing "this is echo"
     printf("exec failed!\n");
-    exit(1);
+    exit(1);                  // If it fails, it ends with status 1
 } else {
     int status;
-    wait(&status);
+    wait(&status);         // Stop and wait for the child process to finish
     printf("the child exited with status %d\n", status);
 }
 ```
@@ -145,9 +138,9 @@ if (pid == 0) {
 ## 12. I/O Redirection — redirect.c
 ```c
 if (fork() == 0) {
-    close(1);
+    close(1);                                  // close fd 1
     open("output.txt", O_WRONLY | O_CREATE);   // guaranteed to return 1
-    exec("echo", argv);
+    exec("echo", argv);                // echo this is echo > output.txt
 }
 ```
 - **`open` returns the lowest unused fd** → after `close(1)`, the file becomes fd 1.

@@ -1,10 +1,3 @@
-# LEC03 - OS Organization and System Calls
-
-## Big Picture
-- **Isolation** is the driving design goal of OS organization.
-- Achieved with **hardware support**: user/kernel mode + page tables (virtual memory).
-- Apps enter the kernel only through a controlled door: **`ecall`**.
-- This lecture starts "inside" the OS: how the system call interface is implemented.
 
 ---
 
